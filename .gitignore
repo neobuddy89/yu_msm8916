@@ -95,5 +95,6 @@ x509.genkey
 # user-specific
 tomato
 lettuce
+out/boot
 out/*.zip
 tmp
