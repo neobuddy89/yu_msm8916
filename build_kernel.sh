@@ -98,7 +98,7 @@ core_build() {
 	./utilities/dtbToolCM -2 -o $KERNELDIR/$TARGET/dt.img -s 2048 -p $KERNELDIR/$TARGET/scripts/dtc/ $KERNELDIR/$TARGET/arch/arm64/boot/dts/
 
 	# copy all needed to out kernel folder
-	./utilities/mkbootimg --kernel $KERNELDIR/$TARGET/arch/arm64/boot/Image --cmdline 'console=ttyHSL0,115200,n8 androidboot.console=ttyHSL0 androidboot.hardware=qcom msm_rtb.filter=0x237 ehci-hcd.park=3 androidboot.bootdevice=7824900.sdhci lpm_levels.sleep_disabled=1' --base 0x80000000 --pagesize 2048 --ramdisk_offset 0x02000000 --tags_offset 0x01E00000 --ramdisk $KERNELDIR/$TARGET/ramdisk-$TARGET.gz --dt $KERNELDIR/$TARGET/dt.img --output $KERNELDIR/out/boot/boot.img
+	./utilities/mkbootimg --kernel $KERNELDIR/$TARGET/arch/arm64/boot/Image --cmdline 'console=ttyHSL0,115200,n8 androidboot.console=ttyHSL0 androidboot.hardware=qcom msm_rtb.filter=0x237 ehci-hcd.park=3 androidboot.bootdevice=7824900.sdhci lpm_levels.sleep_disabled=1 androidboot.selinux=permissive' --base 0x80000000 --pagesize 2048 --ramdisk_offset 0x02000000 --tags_offset 0x01E00000 --ramdisk $KERNELDIR/$TARGET/ramdisk-$TARGET.gz --dt $KERNELDIR/$TARGET/dt.img --output $KERNELDIR/out/boot/boot.img
 }
 
 core_build
