@@ -201,8 +201,38 @@ rm -f system/etc/init.d/99fstrim >> /dev/null;
 
 cd /tmp
 unzip -o "$ZIP"
+chmod 777 -R /tmp
 
-dd if=/tmp/boot/boot.img of=$PART bs=4096
+dd if=/dev/block/bootdevice/by-name/boot of=/tmp/boot.img
+
+cd /tmp
+/tmp/unpackbootimg -i /tmp/boot.img
+rm /tmp/boot.img
+rm /tmp/boot.img-zImage
+
+mkdir /tmp/ramdisk
+mkdir /tmp/boot/ramdisk
+
+mv /tmp/boot.img-ramdisk.gz /tmp/ramdisk/
+mv /tmp/boot/boot.img-ramdisk.gz /tmp/boot/ramdisk/
+
+cd /tmp/ramdisk
+gunzip -c /tmp/ramdisk/boot.img-ramdisk.gz | cpio -i
+cd /tmp/boot/ramdisk
+gunzip -c /tmp/boot/ramdisk/boot.img-ramdisk.gz | cpio -i
+
+rm /tmp/ramdisk/boot.img-ramdisk.gz
+rm /tmp/boot/ramdisk/boot.img-ramdisk.gz
+
+rm /tmp/boot/ramdisk/init.environ.rc
+cp -f /tmp/ramdisk/init.environ.rc /tmp/boot/ramdisk/init.environ.rc
+
+cd /tmp/boot/ramdisk/
+find . | cpio -o -H newc | gzip > /tmp/boot/boot.img-ramdisk.gz
+
+/tmp/mkbootimg --kernel /tmp/boot/Image --ramdisk /tmp/boot/boot.img-ramdisk.gz --cmdline 'console=ttyHSL0,115200,n8 androidboot.console=ttyHSL0 androidboot.hardware=qcom msm_rtb.filter=0x237 ehci-hcd.park=3 androidboot.bootdevice=7824900.sdhci lpm_levels.sleep_disabled=1 androidboot.selinux=permissive' --base 0x80000000 --pagesize 2048 --ramdisk_offset 0x02000000 --tags_offset 0x01E00000 --dt /tmp/boot/dt.img -o /tmp/boot/newboot.img
+
+dd if=/tmp/boot/newboot.img of=$PART bs=4096
 ui_print "Done! Let the Chaos Begin!"
 
 ui_print " "

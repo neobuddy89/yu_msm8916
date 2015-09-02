@@ -29,8 +29,10 @@ echo "${bldcya}***** Setting up Environment for $TARGET *****${txtrst}";
 
 . ./env_setup.sh $TARGET || exit 1;
 rm -rf $KERNELDIR/out/boot >> /dev/null;
+rm -rf $KERNELDIR/out/*.zip >> /dev/null;
 rm -f $KERNELDIR/lettuce/ramdisk* >> /dev/null;
 rm -f $KERNELDIR/tomato/ramdisk* >> /dev/null;
+mkdir -p $KERNELDIR/out/boot;
 
 ramdisk_build() {
 	mkdir -p $KERNELDIR/$TARGET;
@@ -53,7 +55,7 @@ ramdisk_build() {
 	# remove more from from tmp-initramfs ...
 	rm -f $INITRAMFS_TMP/update* >> /dev/null;
 
-	./utilities/mkbootfs $INITRAMFS_TMP | gzip > $KERNELDIR/$TARGET/ramdisk-$TARGET.gz
+	./utilities/mkbootfs $INITRAMFS_TMP | gzip > $KERNELDIR/out/boot/boot.img-ramdisk.gz
 
 	echo "${bldcya}***** Ramdisk Generated for $TARGET *****${txtrst}"
 }
@@ -91,19 +93,17 @@ core_build() {
 	if [ ! -e $KERNELDIR/$TARGET/arch/arm64/boot/Image ]; then
 		echo "${bldred}Kernel STUCK in BUILD!${txtrst}"
 		exit 1;
-	elif [ ! -d $KERNELDIR/out/boot ]; then
-		mkdir -p $KERNELDIR/out/boot;
 	fi;
 
-	./utilities/dtbToolCM -2 -o $KERNELDIR/$TARGET/dt.img -s 2048 -p $KERNELDIR/$TARGET/scripts/dtc/ $KERNELDIR/$TARGET/arch/arm64/boot/dts/
+	./utilities/dtbToolCM -2 -o $KERNELDIR/out/boot/dt.img -s 2048 -p $KERNELDIR/$TARGET/scripts/dtc/ $KERNELDIR/$TARGET/arch/arm64/boot/dts/
 
 	# copy all needed to out kernel folder
-	./utilities/mkbootimg --kernel $KERNELDIR/$TARGET/arch/arm64/boot/Image --cmdline 'console=ttyHSL0,115200,n8 androidboot.console=ttyHSL0 androidboot.hardware=qcom msm_rtb.filter=0x237 ehci-hcd.park=3 androidboot.bootdevice=7824900.sdhci lpm_levels.sleep_disabled=1 androidboot.selinux=permissive' --base 0x80000000 --pagesize 2048 --ramdisk_offset 0x02000000 --tags_offset 0x01E00000 --ramdisk $KERNELDIR/$TARGET/ramdisk-$TARGET.gz --dt $KERNELDIR/$TARGET/dt.img --output $KERNELDIR/out/boot/boot.img
+	cp -f $KERNELDIR/$TARGET/arch/arm64/boot/Image $KERNELDIR/out/boot/Image
 }
 
 core_build
 
-if [ -e $KERNELDIR/out/boot/*.img ]; then
+if [ -e $KERNELDIR/out/boot/Image ]; then
 	echo "${bldcya}***** Final Touch for Kernel *****${txtrst}"
 	rm -f $KERNELDIR/out/Yutopia*.zip >> /dev/null;
 	
