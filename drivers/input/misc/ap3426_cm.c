@@ -213,6 +213,9 @@ static inline void dec(void)    { atomic_dec_if_positive(&log_indent); }
        #define DI_PS_CAL_THR_MIN 0
 #endif
 
+static bool allow_suspend;
+module_param(allow_suspend, bool, 0644);
+
 static void pl_timer_callback(unsigned long pl_data);
 static int ap3426_power_ctl(struct ap3426_data *data, bool on);
 static int ap3426_power_init(struct ap3426_data*data, bool on);
@@ -3072,6 +3075,9 @@ static int ap3426_suspend(struct device *dev)
 {
 	struct ap3426_data *ps_data = dev_get_drvdata(dev);
 
+	if (!allow_suspend)
+		return 0;
+
 	ENTRY("dev:%p)", dev);
 
 	ap3426_lock_mutex(ps_data);
@@ -3099,6 +3105,9 @@ static int ap3426_suspend(struct device *dev)
 static int ap3426_resume(struct device *dev)
 {
 	struct ap3426_data *ps_data = dev_get_drvdata(dev);
+
+	if (!allow_suspend)
+		return 0;
 
 	ENTRY("dev:%p)", dev);
 
