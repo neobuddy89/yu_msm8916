@@ -1,7 +1,7 @@
 /* include/linux/msm_audio.h
  *
  * Copyright (C) 2008 Google, Inc.
- * Copyright (c) 2012 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012, 2014-2015 The Linux Foundation. All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -105,7 +105,10 @@
 #define AUDIO_DEREGISTER_ION _IOW(AUDIO_IOCTL_MAGIC, 98, \
 		struct msm_audio_ion_info)
 
-#define	AUDIO_MAX_COMMON_IOCTL_NUM	100
+#define AUDIO_PM_AWAKE      _IOW(AUDIO_IOCTL_MAGIC, 100, unsigned)
+#define AUDIO_PM_RELAX      _IOW(AUDIO_IOCTL_MAGIC, 101, unsigned)
+
+#define	AUDIO_MAX_COMMON_IOCTL_NUM	102
 
 
 #define HANDSET_MIC			0x01
