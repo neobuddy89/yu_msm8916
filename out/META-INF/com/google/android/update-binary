@@ -10,7 +10,7 @@ ui_print() {
 
 ui_print " "
 ui_print " "
-ui_print "Welcome to Yutopia..."
+ui_print "Hail Hydra..."
 ui_print " "
 ui_print " "
 

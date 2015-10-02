@@ -82,8 +82,8 @@ core_build() {
 	fi;
 
 	. $KERNELDIR/$TARGET/.config
-	GETVER=`grep 'Yutopia-Kernel_v.*' $KERNELDIR/$TARGET/.config | sed 's/.*_.//g' | sed 's/".*//g'`
-	echo "${bldcya}Building => Yutopia ${GETVER} for $TARGET ${txtrst}";
+	GETVER=`grep 'Hydra-Kernel_v.*' $KERNELDIR/$TARGET/.config | sed 's/.*_.//g' | sed 's/".*//g'`
+	echo "${bldcya}Building => Hydra ${GETVER} for $TARGET ${txtrst}";
 	if [ $USER != "root" ]; then
 		make O=$KERNELDIR/$TARGET -j$NUMBEROFCPUS
 	else
@@ -105,10 +105,10 @@ core_build
 
 if [ -e $KERNELDIR/out/boot/Image ]; then
 	echo "${bldcya}***** Final Touch for Kernel *****${txtrst}"
-	rm -f $KERNELDIR/out/Yutopia*.zip >> /dev/null;
+	rm -f $KERNELDIR/out/Hydra*.zip >> /dev/null;
 	
 	cd $KERNELDIR/out/
-	zip -r Yutopia_${TARGET}_v${GETVER}-`date +"[%m-%d]-[%H-%M]"`.zip .
+	zip -r Hydra_${TARGET}_v${GETVER}-`date +"[%m-%d]-[%H-%M]"`.zip .
 	echo "${bldcya}***** Ready to Roar *****${txtrst}";
 	# finished? get elapsed time
 	res2=$(date +%s.%N)
@@ -125,7 +125,7 @@ if [ -e $KERNELDIR/out/boot/Image ]; then
 			sleep 1;
 			ADB_STATUS=`adb get-state` >> /dev/null;
 		done
-		adb push $KERNELDIR/out/Yutopia*.zip /storage/sdcard0/
+		adb push $KERNELDIR/out/Hydra*.zip /storage/sdcard0/
 		while [ "$reboot_recovery" != "y" ] && [ "$reboot_recovery" != "n" ] && [ "$reboot_recovery" != "Y" ] && [ "$reboot_recovery" != "N" ]
 		do
 			read -p "${bldblu}Reboot to recovery?${txtrst}${blu} (y/n)${txtrst}" reboot_recovery;
