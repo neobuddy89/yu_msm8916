@@ -32,6 +32,8 @@
 #if defined(CONFIG_FB)
 #include <linux/notifier.h>
 #include <linux/fb.h>
+#elif defined(CONFIG_HAS_EARLYSUSPEND) 
+#include <linux/earlysuspend.h>
 #endif
 #include <linux/firmware.h>
 #include <linux/proc_fs.h>
@@ -44,8 +46,8 @@
     #include <linux/input/mt.h>
 #endif
 
-/** TODO don't need this anymore. ddata->hw_lock gives the same protection */
 static struct mutex gsl_i2c_lock;
+static struct mutex gsl_wake_config_lock;
 
 /* Print Information */
 #ifdef GSL_DEBUG 
@@ -60,9 +62,13 @@ static struct mutex gsl_i2c_lock;
 /* Timer Function */
 #ifdef GSL_TIMER
 #define GSL_TIMER_CHECK_CIRCLE        200
-#define GSL_TIMER_WATCHDOG_INTERVAL   HZ /* 1 second */
 static struct delayed_work gsl_timer_check_work;
 static struct workqueue_struct *gsl_timer_workqueue = NULL;
+static char int_1st[4] = {0};
+static char int_2nd[4] = {0};
+static char b0_counter = 0;
+static char bc_counter = 0;
+static char i2c_lock_flag = 0;
 #endif
 
 /* Gesture Resume */
@@ -127,6 +133,9 @@ static void gsl_sw_init(struct i2c_client *client);
 
 #if defined(CONFIG_FB)
 static int fb_notifier_callback(struct notifier_block *self,unsigned long event, void *data);
+#elif defined(CONFIG_HAS_EARLYSUSPEND)
+static void gsl_early_suspend(struct early_suspend *handler);
+static void gsl_early_resume(struct early_suspend *handler);
 #endif
 
 #ifdef GSL_GESTURE
@@ -199,20 +208,7 @@ static int gsl_read_interface(struct i2c_client *client, u8 reg, u8 *buf, u32 nu
 		err = i2c_master_recv(client,&buf[0],num);
 	}
 	mutex_unlock(&gsl_i2c_lock);
-
-	if (err < 0)
-		return err;
-
-	return (err == num) ? 0 : -EIO;
-}
-
-static int gsl_read32(struct i2c_client *client, u8 reg, u32 *out) {
-	int rc = gsl_read_interface(client, reg, (u8 *) out, 4);
-	if (rc)
-		return rc;
-
-	*out  = le32_to_cpu(*out);
-	return 0;
+	return (err == num)?1:-1;
 }
 
 static int gsl_ito_read_interface(struct i2c_client *client, u8 reg, u8 *buf, u32 num)
@@ -418,10 +414,9 @@ static void gsl_load_fw(struct i2c_client *client,const struct fw_data *GSL_DOWN
 	u8 addr=0;
 	u32 source_line = 0;
 	u32 source_len = data_len;//ARRAY_SIZE(GSL_DOWNLOAD_DATA);
-	unsigned long start_time_jf;
 
 	print_info("=============gsl_load_fw start==============\n");
-	start_time_jf = jiffies;
+
 	for (source_line = 0; source_line < source_len; source_line++) 
 	{
 		/* init page trans, set the page val */
@@ -429,8 +424,6 @@ static void gsl_load_fw(struct i2c_client *client,const struct fw_data *GSL_DOWN
 		memcpy(buf,&GSL_DOWNLOAD_DATA[source_line].val,4);
 		gsl_write_interface(client, addr, buf, 4);	
 	}
-	dev_info(&client->dev, "gsl_load_fw: took %u ms\n",
-		jiffies_to_msecs(jiffies - start_time_jf));
 	print_info("=============gsl_load_fw end==============\n");
 }
 
@@ -500,7 +493,6 @@ static void gsl_reset_core(struct i2c_client *client)
 	gsl_io_control(client);
 }
 
-#ifdef GSL_GESTURE
 static void gsl_reset_core_without_vddio(struct i2c_client *client)
 {
 	u8 buf[4] = {0x00};
@@ -519,8 +511,6 @@ static void gsl_reset_core_without_vddio(struct i2c_client *client)
 	gsl_write_interface(client,0xbc,buf,4);
 	mdelay(2);
 }
-#endif
-
 static void gsl_clear_reg(struct i2c_client *client)
 {
 	u8 buf[4]={0};
@@ -801,68 +791,100 @@ static const struct file_operations gsl_seq_fops = {
 #endif
 
 #ifdef GSL_TIMER
-static void gsl_watchdog(struct work_struct *work)
+static void gsl_timer_check_func(struct work_struct *work)
 {
 	struct gsl_ts_data *ts = ddata;
 	struct i2c_client *gsl_client = ts->client;
-	u32 tmp;
-	int rc;
+/*    
+	static int i2c_lock_flag = 0;
+	char read_buf[4]  = {0};
+	char init_chip_flag = 0;
+	int i,flag;
+*/
+	u8 read_buf[4]  = {0};
+	char init_chip_flag = 0;
 
-	if(!mutex_trylock(&ddata->hw_lock))
-		goto queue;
+	print_info("----------------gsl_monitor_worker------i2c_lock==%d-----------\n",i2c_lock_flag);	
 
-	rc = gsl_read32(gsl_client, 0xb0, &tmp);
-	if (rc) {
-		dev_err(&gsl_client->dev,
-			"watchdog: error reading reg#b0: %d\n", rc);
-		goto exit_reinit;
+	if(i2c_lock_flag != 0)
+		goto queue_monitor_work;
+	else
+		i2c_lock_flag = 1;
+
+	gsl_read_interface(gsl_client, 0xb0, read_buf, 4);
+    	if(read_buf[3] != 0x5a || read_buf[2] != 0x5a || read_buf[1] != 0x5a || read_buf[0] != 0x5a)
+		b0_counter ++;
+	else
+		b0_counter = 0;
+
+      	if(b0_counter > 1)
+	{
+		print_info("======read 0xb0: %x %x %x %x ======\n",read_buf[3], read_buf[2], read_buf[1], read_buf[0]);
+		init_chip_flag = 1;
+		b0_counter = 0;
+		goto queue_monitor_init_chip;
+	}  
+
+       gsl_read_interface(gsl_client, 0xb4, read_buf, 4);
+       int_2nd[3] = int_1st[3];
+	int_2nd[2] = int_1st[2];
+	int_2nd[1] = int_1st[1];
+	int_2nd[0] = int_1st[0];
+	int_1st[3] = read_buf[3];
+	int_1st[2] = read_buf[2];
+	int_1st[1] = read_buf[1];
+	int_1st[0] = read_buf[0];
+
+
+	if (int_1st[3] == int_2nd[3] && int_1st[2] == int_2nd[2] &&int_1st[1] == int_2nd[1] && int_1st[0] == int_2nd[0]) 
+	{
+		print_info("======int_1st: %x %x %x %x , int_2nd: %x %x %x %x ======\n",int_1st[3], int_1st[2], int_1st[1], int_1st[0], int_2nd[3], int_2nd[2],int_2nd[1],int_2nd[0]);
+		init_chip_flag = 1;
+		goto queue_monitor_init_chip;
 	}
 
-	if (tmp != 0x5a5a5a5a) {
-		dev_err(&gsl_client->dev, "watchdog: invalid reg#b0 value = %#08x\n",
-			tmp);
-		goto exit_reinit;
+#if 1 //version 1.4.0 or later than 1.4.0 read 0xbc for esd checking
+       gsl_read_interface(gsl_client, 0xbc, read_buf, 4);
+	if(read_buf[3] != 0 || read_buf[2] != 0 || read_buf[1] != 0 || read_buf[0] != 0)
+		bc_counter++;
+	else
+		bc_counter = 0;
+	if(bc_counter > 1)
+	{
+		print_info("======read 0xbc: %x %x %x %x======\n",read_buf[3], read_buf[2], read_buf[1], read_buf[0]);
+		init_chip_flag = 1;
+		bc_counter = 0;
 	}
+#else
+	write_buf[3] = 0x01;
+	write_buf[2] = 0xfe;
+	write_buf[1] = 0x10;
+	write_buf[0] = 0x00;
+	gsl_write_interface(gsl_client, 0xf0, write_buf,4);
+	gsl_read_interface(gsl_client, 0x10, read_buf, 4);
+	gsl_read_interface(gsl_client, 0x10, read_buf, 4);
+	
+	if(read_buf[3] < 10 && read_buf[2] < 10 && read_buf[1] < 10 && read_buf[0] < 10)
+		dac_counter ++;
+	else
+		dac_counter = 0;
 
-	rc = gsl_read32(gsl_client, 0xb4, &tmp);
-	if (rc) {
-		dev_err(&gsl_client->dev,
-			"watchdog: error reading reg#b4: %d\n", rc);
-		goto exit_reinit;
+	if(dac_counter > 1) 
+	{
+		print_info("======read DAC1_0: %x %x %x %x ======\n",read_buf[3], read_buf[2], read_buf[1], read_buf[0]);
+		init_chip_flag = 1;
+		dac_counter = 0;
 	}
+#endif
 
-	if (tmp == ddata->watchdog_counter) {
-		dev_err(&gsl_client->dev, "watchdog: hang detected. counter stuck at %#08x\n",
-			tmp);
-		goto exit_reinit;
-	}
-	ddata->watchdog_counter = tmp;
+queue_monitor_init_chip:
+	if(init_chip_flag)
+		gsl_sw_init(gsl_client);
+	
+	i2c_lock_flag = 0;
 
-	/* version 1.4.0 or later than 1.4.0 read 0xbc for esd checking */
-	rc = gsl_read32(gsl_client, 0xbc, &tmp);
-	if (rc) {
-		dev_err(&gsl_client->dev,
-			"watchdog: error reading reg#bc: %d\n", rc);
-		goto exit_reinit;
-	}
-
-	if (tmp != 0) {
-		dev_err(&gsl_client->dev, "watchdog: unexpected reg#bc value = %#08x\n",
-			tmp);
-		goto exit_reinit;
-	}
-
-	goto exit;
-
-exit_reinit:
-	dev_warn(&gsl_client->dev, "watchdog: full re-init needed\n");
-	gsl_sw_init(gsl_client);
-exit:
-	mutex_unlock(&ddata->hw_lock);
-
-queue:
-	queue_delayed_work(gsl_timer_workqueue, &gsl_timer_check_work,
-		GSL_TIMER_WATCHDOG_INTERVAL);
+queue_monitor_work:	
+	queue_delayed_work(gsl_timer_workqueue, &gsl_timer_check_work,100);
 }
 #endif
 
@@ -1026,8 +1048,6 @@ static void gsl_sw_init(struct i2c_client *client)
 	//struct fw_data *fw = GSLx68x_FW;
 	if(1==ddata->gsl_sw_flag)
 		return;
-
-	dev_dbg(&client->dev, "begin sw init\n");
 	ddata->gsl_sw_flag = 1;
 	
 	gpio_set_value(GSL_RST_GPIO_NUM, 0);
@@ -1080,7 +1100,6 @@ static void check_mem_data(struct i2c_client *client)
 	{
 		print_info("0xb4 ={0x%02x%02x%02x%02x}\n",
 			read_buf[3], read_buf[2], read_buf[1], read_buf[0]);
-		dev_warn(&client->dev, "fw corruption detected, reloading\n");
 		gsl_sw_init(client);
 	}
 #endif	
@@ -1381,8 +1400,6 @@ static void gsl_enter_doze(struct gsl_ts_data *ts, bool bCharacterGesture)
 	gsl_start_core(ts->client);
 	msleep(1000);		
 #endif
-	WARN_ON(dozing);
-	dozing = true;
 
 	buf[0] = 0xa;
 	buf[1] = 0;
@@ -1399,23 +1416,20 @@ static void gsl_enter_doze(struct gsl_ts_data *ts, bool bCharacterGesture)
 	}
 	gsl_write_interface(ts->client,0x8,buf,4);
 	//gsl_gesture_status = GE_NOWORK;
+	msleep(10);
 	gsl_gesture_status = GE_ENABLE;
+	dozing = true;
 
-	dev_dbg(&ts->client->dev, "entering doze mode (gesture mode:%d)\n",
-		(int) bCharacterGesture);
 }
 static void gsl_quit_doze(struct gsl_ts_data *ts)
 {
 	u8 buf[4] = {0};
 	//u32 tmp;
 
-	WARN_ON(!dozing);
-
-	/* disable the IRQ while we go reset the peripheral */
-	disable_irq(ts->client->irq);
-
+	dozing = false;
 	gsl_gesture_status = GE_DISABLE;
-
+	free_irq(ts->client->irq,ddata);
+		
 	gpio_direction_output(GSL_IRQ_GPIO_NUM,0);
 	gpio_set_value(GSL_RST_GPIO_NUM,0);
 	mdelay(5);
@@ -1442,12 +1456,6 @@ static void gsl_quit_doze(struct gsl_ts_data *ts)
 	gsl_load_fw(ddata->client,GSLX68X_FW_CONFIG,temp);
 	gsl_start_core(ddata->client);
 #endif
-	dozing = false;
-
-	/* all done, re-enable IRQ */
-	enable_irq(ts->client->irq);
-
-	dev_dbg(&ts->client->dev, "exiting doze mode\n");
 }
 
 static ssize_t gsl_sysfs_tpgesture_show(struct device *dev,
@@ -1458,16 +1466,27 @@ static ssize_t gsl_sysfs_tpgesture_show(struct device *dev,
 static ssize_t gsl_sysfs_tpgesturet_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t count)
 {
-	mutex_lock(&ddata->hw_lock);
+	struct gsl_ts_data *ts = ddata;
+	struct i2c_client *gsl_client = ts->client;
+	int old_gesture_flag;
+
+	mutex_lock(&gsl_wake_config_lock);
+	old_gesture_flag = gsl_gesture_flag;
 	if(buf[0] == '0'){
 		gsl_gesture_flag = 0;  
+		if (old_gesture_flag)
+			disable_irq_wake(gsl_client->irq);
 	}else if(buf[0] == '1'){
 		gsl_gesture_flag = 1;
+		if (!old_gesture_flag)
+			enable_irq_wake(gsl_client->irq);
 	}else if(buf[0] == '2'){
 	//enable character gesture
 		gsl_gesture_flag = 2;
+		if (!old_gesture_flag)
+			enable_irq_wake(gsl_client->irq);
 	}
-	mutex_unlock(&ddata->hw_lock);
+	mutex_unlock(&gsl_wake_config_lock);
 
 	return count;
 }
@@ -1607,12 +1626,11 @@ static void gsl_report_point(struct input_dev *idev, struct gsl_touch_info *cinf
 }
 
 
-static irqreturn_t gsl_ts_isr(int irq, void *priv)
+static void gsl_report_work(struct work_struct *work)
 {
 	int rc,tmp;
 	u8 buf[44] = {0};
 	int tmp1=0;
-	struct gsl_ts_data *ddata = priv;
 	struct gsl_touch_info *cinfo = ddata->cinfo;
 	struct i2c_client *client = ddata->client;
 	struct input_dev *idev = ddata->idev;
@@ -1628,8 +1646,10 @@ static irqreturn_t gsl_ts_isr(int irq, void *priv)
 	//if(1 == ddata->gsl_sw_flag)
 	//	goto schedule;
     #ifdef GSL_TIMER
-	if(!mutex_trylock(&ddata->hw_lock))
+	if(i2c_lock_flag != 0)
 		goto i2c_lock_schedule;
+	else
+		i2c_lock_flag = 1;
     #endif
 	
 	#ifdef TPD_PROC_DEBUG
@@ -1775,17 +1795,14 @@ static irqreturn_t gsl_ts_isr(int irq, void *priv)
 			else {
 				gsl_gesture_c = (char)(tmp_c & 0xff);
 				gsl_gesture_status = GE_WAKEUP;
-				dev_dbg(&client->dev, "wake up gesture: %#02x '%c'\n",
-					gsl_gesture_c, gsl_gesture_c);
-				wake_lock_timeout(&ddata->gesture_wake_lock,
-					GSL_GESTURE_WAKELOCK_DUR);
-
+				print_info("gsl_obtain_gesture():tmp_c=%c\n",gsl_gesture_c);
 				//input_report_key(tpd->dev,key_data,1);
 				input_report_key(idev, KEY_POWER,1);
 				input_sync(idev);
 				//input_report_key(tpd->dev,key_data,0);
 				input_report_key(idev,KEY_POWER,0);
 				input_sync(idev);
+				mdelay(50);
 			}
 			goto schedule;
 		}
@@ -1796,10 +1813,10 @@ static irqreturn_t gsl_ts_isr(int irq, void *priv)
 	
 schedule:
 #ifdef GSL_TIMER
-	mutex_unlock(&ddata->hw_lock);
+	i2c_lock_flag = 0;
 i2c_lock_schedule:
 #endif	
-	return IRQ_HANDLED;
+	enable_irq(client->irq);
 }
 
 static int gsl_request_input_dev(struct gsl_ts_data *ddata)
@@ -1870,15 +1887,27 @@ err_allocate_input_device_fail:
 	return err;
 }
 
+static irqreturn_t gsl_ts_interrupt(int irq, void *dev_id)
+{
+	struct i2c_client *client = ddata->client;
+	//print_info("gslX68X_ts_interrupt\n");
+	
+	disable_irq_nosync(client->irq);
+	
+	if (!work_pending(&ddata->work)) {
+		queue_work(ddata->wq, &ddata->work);
+	}
+	
+	return IRQ_HANDLED;
+}
+
 #if defined(CONFIG_FB)
 static void gsl_ts_suspend(void)
 {
 	u32 tmp;
-#ifndef GSL_GESTURE
+//#ifndef GSL_GESTURE
 	struct i2c_client *client = ddata->client;
-#endif
-
-	mutex_lock(&ddata->hw_lock);
+//#endif
 	print_info("==gslX68X_ts_suspend=\n");
 	//version info
 	print_info("[tp-gsl]the last time of debug:%x\n",TPD_DEBUG_TIME);
@@ -1895,7 +1924,7 @@ static void gsl_ts_suspend(void)
   if(proximity_enable == 1)
   {
 	  flag_tp_down = 1;
-	  goto exit_unlock;
+	  return;
   }
   
   /*zhangpeng add start*/
@@ -1914,18 +1943,29 @@ static void gsl_ts_suspend(void)
 
 /*Guesture Resume*/
 #ifdef GSL_GESTURE
-	/* always doze */
-	gsl_enter_doze(ddata, gsl_gesture_flag == 2);
-#else
+		if(gsl_gesture_flag == 1){
+			gsl_enter_doze(ddata, false);
+			return;
+		}
+		else if(gsl_gesture_flag == 2)
+		{
+			gsl_enter_doze(ddata, true);
+			return;
+		}
+		else
+		{
+			disable_irq_nosync(client->irq);
+			gpio_set_value(GSL_RST_GPIO_NUM, 0);		
+			gsl_power_on(client, false);
+		}
+#endif
+
+#ifndef GSL_GESTURE
 	disable_irq_nosync(client->irq);
 	gpio_set_value(GSL_RST_GPIO_NUM, 0);
 	gsl_power_on(client, false);
 #endif
-
-#ifdef GSL_PROXIMITY_SENSOR
-exit_unlock:
-#endif
-	mutex_unlock(&ddata->hw_lock);
+	
 	return;
 }
 
@@ -1933,8 +1973,6 @@ static void gsl_ts_resume(void)
 {	
 	struct i2c_client *client = ddata->client;
 	print_info("==gslX68X_ts_resume=\n");
-
-	mutex_lock(&ddata->hw_lock);
 	//if(1==ddata->gsl_sw_flag){
 	//	ddata->gsl_halt_flag = 0;
 	//	return;
@@ -1949,7 +1987,7 @@ static void gsl_ts_resume(void)
 			{
 				flag_tp_down = 0;
 			}
-			goto exit_unlock;
+			return;
 		}
 
 		//zhangpeng add start
@@ -1959,8 +1997,24 @@ static void gsl_ts_resume(void)
 
 	/*Gesture Resume*/
 	#ifdef GSL_GESTURE
-		WARN_ON(!dozing);
-		gsl_quit_doze(ddata);
+		if((gsl_gesture_flag == 1)||(gsl_gesture_flag == 2) || dozing){
+			gsl_quit_doze(ddata);
+			{
+			int err = 0;
+			//msleep(10);
+			err = request_irq(client->irq, gsl_ts_interrupt, IRQF_TRIGGER_RISING, client->name, ddata);
+			if (err < 0) {
+				dev_err(&client->dev, " request irq failed\n");
+			}
+			}
+		}
+		else
+		{
+			gsl_power_on(client, true);
+			gpio_set_value(GSL_RST_GPIO_NUM, 1);
+			msleep(20);
+			enable_irq(client->irq);		
+		}
 	#else
 		gsl_power_on(client, true);
 		gpio_set_value(GSL_RST_GPIO_NUM, 1);
@@ -1974,21 +2028,15 @@ static void gsl_ts_resume(void)
 	
 #ifdef TPD_PROC_DEBUG
 	if(gsl_proc_flag == 1){
-		goto exit_unlock;
+		return;
 	}
 #endif
 	
 #ifdef GSL_TIMER
-	ddata->watchdog_counter = 0;
 	queue_delayed_work(gsl_timer_workqueue, &gsl_timer_check_work, 300);
 #endif
 
 	ddata->gsl_halt_flag = 0;
-
-#if defined(GSL_PROXIMITY_SENSOR) || defined(TPD_PROC_DEBUG)
-exit_unlock:
-#endif
-	mutex_unlock(&ddata->hw_lock);
 	return;
 
 }
@@ -2013,6 +2061,67 @@ static int fb_notifier_callback(struct notifier_block *self,
 	}
 
 	return 0;
+}
+#elif defined(CONFIG_HAS_EARLYSUSPEND)
+static void gsl_early_suspend(struct early_suspend *handler)
+{
+	u32 tmp;
+	struct i2c_client *client = ddata->client;
+	print_info("==gslX68X_ts_suspend=\n");
+	//version info
+	print_info("[tp-gsl]the last time of debug:%x\n",TPD_DEBUG_TIME);
+
+	//if(1==ddata->gsl_sw_flag)
+	//	return;
+
+	ddata->gsl_halt_flag = 1;
+
+#ifdef TPD_PROC_DEBUG
+	if(gsl_proc_flag == 1){
+		return;
+	}
+#endif
+
+#ifdef GSL_ALG_ID
+	tmp = gsl_version_id();	
+	print_info("[tp-gsl]the version of alg_id:%x\n",tmp);
+#endif
+#ifdef GSL_TIMER	
+	cancel_delayed_work_sync(&gsl_timer_check_work);
+#endif	
+
+	disable_irq_nosync(client->irq);
+	gpio_set_value(GSL_RST_GPIO_NUM, 0);
+}
+
+static void gsl_early_resume(struct early_suspend *handler)
+{	
+	struct i2c_client *client = ddata->client;
+	print_info("==gslX68X_ts_resume=\n");
+	//if(1==ddata->gsl_sw_flag){
+	//	ddata->gsl_halt_flag = 0;
+	//	return;
+	//}
+
+	gpio_set_value(GSL_RST_GPIO_NUM, 1);
+	msleep(20);
+	gsl_reset_core(client);
+	gsl_start_core(client);
+	msleep(20);
+	check_mem_data(client);
+	enable_irq(client->irq);
+#ifdef TPD_PROC_DEBUG
+	if(gsl_proc_flag == 1){
+		return;
+	}
+#endif
+	
+#ifdef GSL_TIMER
+	queue_delayed_work(gsl_timer_workqueue, &gsl_timer_check_work, GSL_TIMER_CHECK_CIRCLE);
+#endif
+	
+	ddata->gsl_halt_flag = 0;
+
 }
 #endif
 
@@ -2205,7 +2314,7 @@ static int gsl_ts_probe(struct i2c_client *client, const struct i2c_device_id *i
 		goto exit_alloc_cinfo_failed;
 	}
 	mutex_init(&gsl_i2c_lock);
-	mutex_init(&ddata->hw_lock);
+	mutex_init(&gsl_wake_config_lock);
 		
 	ddata->client = client;
 	i2c_set_clientdata(client, ddata);
@@ -2234,7 +2343,32 @@ static int gsl_ts_probe(struct i2c_client *client, const struct i2c_device_id *i
 		dev_err(&ddata->client->dev,
 			"Unable to register fb_notifier: %d\n",
 			err);
+	#elif defined(CONFIG_HAS_EARLYSUSPEND)
+	ddata->pm.level = EARLY_SUSPEND_LEVEL_BLANK_SCREEN + 1;
+	ddata->pm.suspend = gsl_early_suspend;
+	ddata->pm.resume = gsl_early_resume;
+	register_early_suspend(&ddata->pm);
 	#endif
+
+	/*init work queue*/
+	INIT_WORK(&ddata->work, gsl_report_work);
+	ddata->wq = create_singlethread_workqueue(dev_name(&client->dev));
+	if (!ddata->wq) {
+		err = -ESRCH;
+		goto exit_create_singlethread;
+	}
+
+	/*request irq */
+	client->irq = GSL_IRQ_NUM;
+	print_info("%s: ==request_irq=\n",__func__);
+	print_info("%s IRQ number is %d\n", client->name, client->irq);
+	err = request_irq(client->irq, gsl_ts_interrupt, IRQF_TRIGGER_RISING, client->name, ddata);
+	if (err < 0) {
+		dev_err(&client->dev, "gslX68X_probe: request irq failed\n");
+		goto exit_irq_request_failed;
+	}
+	
+	disable_irq_nosync(client->irq);
 
 	/*gesture resume*/
 	#ifdef GSL_GESTURE
@@ -2270,7 +2404,7 @@ static int gsl_ts_probe(struct i2c_client *client, const struct i2c_device_id *i
 #endif
 	
 #ifdef GSL_TIMER
-	INIT_DELAYED_WORK(&gsl_timer_check_work, gsl_watchdog);
+	INIT_DELAYED_WORK(&gsl_timer_check_work, gsl_timer_check_func);
 	gsl_timer_workqueue = create_workqueue("gsl_timer_check");
 	queue_delayed_work(gsl_timer_workqueue, &gsl_timer_check_work, GSL_TIMER_CHECK_CIRCLE);
 #endif
@@ -2319,6 +2453,13 @@ static int gsl_ts_probe(struct i2c_client *client, const struct i2c_device_id *i
 		create_ctp_proc();
 #endif
 
+	enable_irq(client->irq);
+
+#ifdef GSL_GESTURE
+	if (gsl_gesture_flag)
+		enable_irq_wake(client->irq);
+#endif
+
 	//zhangpeng add for TW test.
 	//add for The hardware information begin
 	version = gsl_ts_read_version();
@@ -2333,38 +2474,23 @@ static int gsl_ts_probe(struct i2c_client *client, const struct i2c_device_id *i
 
 #ifdef GSL_GESTURE
 	set_bit(KEY_POWER, gesture_bmp);
-	wake_lock_init(&ddata->gesture_wake_lock,
-		WAKE_LOCK_SUSPEND, "gsl_ts_gesture");
-#endif
-
-	/* TODO - get IRQ from device tree */
-	client->irq = GSL_IRQ_NUM;
-
-	dev_info(&client->dev, "%s IRQ number is %d\n", client->name, client->irq);
-	err = request_threaded_irq(client->irq, NULL, gsl_ts_isr,
-		IRQF_TRIGGER_RISING | IRQF_ONESHOT, client->name, ddata);
-	if (err < 0) {
-		dev_err(&client->dev, "gslX68X_probe: request irq failed\n");
-		goto exit_irq_request_failed;
-	}
-
-#ifdef GSL_GESTURE
-	if (gsl_gesture_flag)
-		enable_irq_wake(client->irq);
 #endif
 
 	//is_tp_driver_loaded = 1;
 	print_info("%s: ==probe over =\n",__func__);
 	return 0;
 
+
 exit_irq_request_failed:
-#ifdef GSL_GESTURE
-	wake_lock_destroy(&ddata->gesture_wake_lock);
-#endif
+	cancel_work_sync(&ddata->work);
+	destroy_workqueue(ddata->wq);
+exit_create_singlethread:
 	#if defined(CONFIG_FB)
 	if (fb_unregister_client(&ddata->fb_notif))
 		dev_err(&client->dev,
 			"Error occurred while unregistering fb_notifier.\n");
+	#elif defined(CONFIG_HAS_EARLYSUSPEND)
+	unregister_early_suspend(&ddata->pm);
 	#endif
  
 	input_unregister_device(ddata->idev);
@@ -2386,9 +2512,6 @@ static int  gsl_ts_remove(struct i2c_client *client)
 
 	print_info("==gslX68X_ts_remove=\n");
 	
-#ifdef GSL_GESTURE
-	wake_lock_destroy(&ddata->gesture_wake_lock);
-#endif
 	if (fb_unregister_client(&ddata->fb_notif))
 			dev_err(&client->dev,"Error occurred while unregistering fb_notifier.\n");
 
@@ -2398,6 +2521,8 @@ static int  gsl_ts_remove(struct i2c_client *client)
 	gpio_free(GSL_RST_GPIO_NUM);
 	gpio_free(GSL_IRQ_GPIO_NUM);
 	
+	cancel_work_sync(&ddata->work);
+	destroy_workqueue(ddata->wq);
 	i2c_set_clientdata(client, NULL);
 	//sprd_free_gpio_irq(client->irq);
 	kfree(ddata->cinfo);
@@ -2411,57 +2536,6 @@ static const struct i2c_device_id gsl_ts_id[] = {
 	{ GSL_TS_NAME, GSL_TS_ADDR },
 	{ }
 };
-
-#ifdef CONFIG_PM
-static int gsl_ts_pm_suspend(struct device *dev)
-{
-	struct gsl_ts_data *ddata = dev_get_drvdata(dev);
-
-#ifdef GSL_GESTURE
-	/* expect the screen to be blanked when suspended */
-	if (WARN_ON(!dozing))
-		return -EAGAIN;
-#endif
-
-	/* there shouldn't be any pending delayed work when dozing */
-	if (WARN_ON(delayed_work_pending(&gsl_timer_check_work)))
-		return -EAGAIN;
-
-	disable_irq(ddata->client->irq);
-
-#ifdef GSL_GESTURE
-	if (gsl_gesture_flag) {
-		dev_dbg(dev, "suspend: wake up enabled\n");
-		enable_irq_wake(ddata->client->irq);
-	} else {
-		dev_dbg(dev, "suspend: wake up disabled\n");
-	}
-#else
-	dev_dbg(dev, "suspend: wake up disabled\n");
-#endif
-
-	return 0;
-}
-
-static int gsl_ts_pm_resume(struct device *dev)
-{
-	struct gsl_ts_data *ddata = dev_get_drvdata(dev);
-
-#ifdef GSL_GESTURE
-	if (gsl_gesture_flag)
-		disable_irq_wake(ddata->client->irq);
-#endif
-
-	enable_irq(ddata->client->irq);
-
-	dev_dbg(dev, "resume\n");
-	return 0;
-}
-
-SIMPLE_DEV_PM_OPS(gsl_ts_pm_ops, gsl_ts_pm_suspend, gsl_ts_pm_resume);
-#else
-#define gsl_ts_pm_ops NULL
-#endif /* CONFIG_PM */
 
 MODULE_DEVICE_TABLE(i2c, gsl_ts_id);
 
@@ -2479,7 +2553,6 @@ static struct i2c_driver gsl_ts_driver = {
 		.name = GSL_TS_NAME,
         .owner    = THIS_MODULE,
 		.of_match_table = gsl_match_table,
-		.pm = &gsl_ts_pm_ops,
 	},
 	.probe = gsl_ts_probe,
 	.remove = gsl_ts_remove,
